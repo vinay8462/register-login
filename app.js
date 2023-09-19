@@ -3,8 +3,9 @@ const { open } = require("sqlite");
 const sqlite3 = require("sqlite3");
 const path = require("path");
 const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 
-const databasePath = path.join(__dirname, "userData.db");
+const databasePath = path.join(__dirname, "twitterClone.db");
 
 const app = express();
 
@@ -31,11 +32,11 @@ const initializeDbAndServer = async () => {
 initializeDbAndServer();
 
 const validatePassword = (password) => {
-  return password.length > 4;
+  return password.length > 6;
 };
 
 app.post("/register", async (request, response) => {
-  const { username, name, password, gender, location } = request.body;
+  const { username, name, password, gender } = request.body;
   const hashedPassword = await bcrypt.hash(password, 10);
   const selectUserQuery = `SELECT * FROM user WHERE username = '${username}';`;
   const databaseUser = await database.get(selectUserQuery);
@@ -43,15 +44,15 @@ app.post("/register", async (request, response) => {
   if (databaseUser === undefined) {
     const createUserQuery = `
      INSERT INTO
-      user (username, name, password, gender, location)
+      user 
+      (username, name, password, gender)
      VALUES
       (
        '${username}',
        '${name}',
        '${hashedPassword}',
-       '${gender}',
-       '${location}'  
-      );`;
+       '${gender}'
+      )`;
     if (validatePassword(password)) {
       await database.run(createUserQuery);
       response.send("User created successfully");
@@ -79,7 +80,9 @@ app.post("/login", async (request, response) => {
       databaseUser.password
     );
     if (isPasswordMatched === true) {
-      response.send("Login success!");
+      const payload = { username: username };
+      const jwtToken = jwt.sign(payload, "SECRET_KEY");
+      response.send({ jwtToken });
     } else {
       response.status(400);
       response.send("Invalid password");
@@ -87,41 +90,127 @@ app.post("/login", async (request, response) => {
   }
 });
 
-app.put("/change-password", async (request, response) => {
-  const { username, oldPassword, newPassword } = request.body;
-  const selectUserQuery = `SELECT * FROM user WHERE username = '${username}';`;
-  const databaseUser = await database.get(selectUserQuery);
-  if (databaseUser === undefined) {
-    response.status(400);
-    response.send("Invalid user");
+// Authenticate middleware with JWT token
+
+const authenticateToken = (request, response, next) => {
+  let jwtToken;
+  const authHeader = request.headers["authorization"];
+  if (authHeader !== undefined) {
+    jwtToken = authHeader.split(" ")[1];
+  }
+  if (jwtToken === undefined) {
+    response.status(401);
+    response.send("Invalid JWT Token");
   } else {
-    const isPasswordMatched = await bcrypt.compare(
-      oldPassword,
-      databaseUser.password
-    );
-    if (isPasswordMatched === true) {
-      if (validatePassword(newPassword)) {
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
-        const updatePasswordQuery = `
-          UPDATE
-            user
-          SET
-            password = '${hashedPassword}'
-          WHERE
-            username = '${username}';`;
-
-        const user = await database.run(updatePasswordQuery);
-
-        response.send("Password updated");
+    jwt.verify(jwtToken, "SECRET_KEY", async (error, payload) => {
+      if (error) {
+        response.status(401);
+        response.send("Invalid JWT Token");
       } else {
-        response.status(400);
-        response.send("Password is too short");
+        next();
       }
-    } else {
-      response.status(400);
-      response.send("Invalid current password");
-    }
+    });
+  }
+};
+
+app.get("/user/tweets/feed/", authenticateToken, async (request, response) => {
+  let { userId } = request;
+  const selectUserQuery = `SELECT username, tweet, date_time FROM user NATURAL JOIN tweet WHERE user_id = ${userId}`;
+  const userDetails = await database.get(selectUserQuery);
+  response.send(selectUserQuery);
+});
+
+app.get("/user/following/", authenticateToken, async (request, response) => {
+  let { followingUserId } = request;
+  const selectUserQuery = `SELECT username FROM user NATURAL JOIN follower WHERE user_id = '${followingUserId}'`;
+  const userDetails = await database.get(selectUserQuery);
+  response.send({ userDetails });
+});
+
+app.get("/user/followers/", authenticateToken, async (request, response) => {
+  let { followerUserId } = request;
+  const selectUserQuery = `SELECT username FROM user NATURAL JOIN follower WHERE user_id = '${followerUserId}'`;
+  const userDetails = await database.get(selectUserQuery);
+  response.send(userDetails);
+});
+
+app.get("/tweets/:tweetId/", authenticateToken, async (request, response) => {
+  let { tweetId } = request;
+  const selectUserQuery = `SELECT tweet, date_time FROM tweet NATURAL JOIN follower WHERE follower_user_id = '${tweetId}'`;
+  if (selectUserQuery !== null) {
+    const userDetails = await database.get(selectUserQuery);
+    response.send(userDetails);
+  } else {
+    response.status(401);
+    response.send("Invalid Request");
   }
 });
+
+app.get(
+  "/tweets/:tweetId/likes/",
+  authenticateToken,
+  async (request, response) => {
+    let { tweetId } = request;
+    const selectUserQuery = `SELECT * FROM tweet NATURAL JOIN follower WHERE user_id = '${tweetId}'`;
+    if (selectUserQuery !== null) {
+      const userDetails = await database.get(selectUserQuery);
+      response.send(userDetails);
+    } else {
+      response.status(401);
+      response.send("Invalid Request");
+    }
+  }
+);
+
+app.get(
+  "/tweets/:tweetId/replies/",
+  authenticateToken,
+  async (request, response) => {
+    let { tweetId } = request;
+    const selectUserQuery = `SELECT * FROM tweet NATURAL JOIN follower WHERE following_user_id = '${tweetId}'`;
+    if (selectUserQuery !== null) {
+      const userDetails = await database.get(selectUserQuery);
+      response.send(userDetails);
+    } else {
+      response.status(401);
+      response.send("Invalid Request");
+    }
+  }
+);
+
+app.get("/user/tweets/", authenticateToken, async (request, response) => {
+  let { userId } = request;
+  const selectUserQuery = `SELECT tweet FROM tweet  WHERE user_id = '${userId}'`;
+  const userDetails = await database.all(selectUserQuery);
+  response.send(userDetails);
+});
+
+app.post("/user/tweets/", authenticateToken, async (request, response) => {
+  let { tweet } = request.body;
+  const addTweetQuery = `
+    INSERT INTO
+      tweet (tweet)
+    VALUES
+      (
+        '${tweet}' 
+      );`;
+  const userDetails = await database.run(addTweetQuery);
+  response.send("Created a Tweet");
+});
+
+app.delete(
+  "/tweets/:tweetId/",
+  authenticateToken,
+  async (request, response) => {
+    let { tweetId } = request;
+    const deleteTweetQuery = `
+    DELETE FROM
+      tweet  
+    WHERE
+      tweet_id = ${tweetId};`;
+    await database.run(deleteTweetQuery);
+    response.send("Tweet Removed");
+  }
+);
 
 module.exports = app;
